@@ -1,66 +1,136 @@
-# 中证2000与沪深300比值分析脚本
-# 依赖库：tushare、pandas、matplotlib
+# 指数比值分析系统（带数据库缓存 + 可视化 + Tkinter交互）
 
 import tushare as ts
 import pandas as pd
-import matplotlib.pyplot as plt
-from datetime import datetime
-import sys
-import io
+import sqlite3
 import os
+import matplotlib.pyplot as plt
+import tkinter as tk
+from tkinter import ttk, messagebox
+from datetime import datetime
 
-# 确保标准输出编码为 UTF-8
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', line_buffering=True)
-os.environ["PYTHONIOENCODING"] = "utf-8"
-# 初始化 tushare
-TOKEN = '30f35108e87dec2f757afd730f4709c9e2af38b468895e73c9a3312a'  # <<< 替换为你的 Tushare Pro Token
+# 配置 tushare
+TOKEN = 'YOUR_TUSHARE_TOKEN_HERE'  # <<< 替换为你的 token
 ts.set_token(TOKEN)
 pro = ts.pro_api()
 
 # 配置参数
-start_date = '20240701'
-end_date = datetime.today().strftime('%Y%m%d')
+DB_NAME = 'index_data.db'
+TABLE_NAME = 'index'
+START_DATE = '20240101'
+TODAY = datetime.today().strftime('%Y%m%d')
 
-# 指数代码
-CSI_2000 = '000933.SH'  # 中证2000
-CSI_300 = '000300.SH'   # 沪深300
+# 常用指数代码列表
+INDEX_DICT = {
+    '上证综指': '000001.SH',
+    '沪深300': '000300.SH',
+    '中证500': '000905.SH',
+    '中证1000': '000852.SH',
+    '中证2000': '000933.SH',
+    '创业板指': '399006.SZ',
+    '科创50': '000688.SH'
+}
 
-# 获取指数日线行情（复权因子不适用指数）
-def get_index_close(ts_code):
-    df = pro.index_daily(ts_code=ts_code, start_date=start_date, end_date=end_date)
-    df = df[['trade_date', 'close']].sort_values('trade_date')
+# 创建数据库表结构
+def create_index_table():
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute(f'''
+        CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
+            ts_code TEXT,
+            trade_date TEXT,
+            close REAL,
+            PRIMARY KEY (ts_code, trade_date)
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+# 下载并更新指数数据
+def update_index_data():
+    create_index_table()
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    for name, ts_code in INDEX_DICT.items():
+        df = pro.index_daily(ts_code=ts_code, start_date=START_DATE, end_date=TODAY)
+        if df.empty:
+            continue
+        df = df[['ts_code', 'trade_date', 'close']]
+        df.to_sql(TABLE_NAME, conn, if_exists='append', index=False, method='multi')
+    conn.close()
+    messagebox.showinfo("更新完成", "指数数据已更新到数据库。")
+
+# 从数据库中读取指数数据
+def load_index_data(ts_code):
+    conn = sqlite3.connect(DB_NAME)
+    df = pd.read_sql_query(f"SELECT trade_date, close FROM {TABLE_NAME} WHERE ts_code = ? ORDER BY trade_date", conn, params=(ts_code,))
+    conn.close()
     df['trade_date'] = pd.to_datetime(df['trade_date'])
     df.set_index('trade_date', inplace=True)
     return df
 
-# 获取数据
-df_2000 = get_index_close(CSI_2000)
-df_300 = get_index_close(CSI_300)
+# 绘图函数
+def plot_ratio(numerator_code, denominator_code):
+    df_n = load_index_data(numerator_code)
+    df_d = load_index_data(denominator_code)
+    df = pd.DataFrame()
+    df['n'] = df_n['close']
+    df['d'] = df_d['close']
+    df.dropna(inplace=True)
 
-# 合并数据
-df = pd.DataFrame()
-df['2000'] = df_2000['close']
-df['300'] = df_300['close']
-df.dropna(inplace=True)
+    base_n = df['n'].iloc[0]
+    base_d = df['d'].iloc[0]
+    df['n_norm'] = df['n'] / base_n * 100
+    df['d_norm'] = df['d'] / base_d * 100
+    df['ratio'] = df['n_norm'] / df['d_norm']
+    df['ma20'] = df['ratio'].rolling(window=20).mean()
+    df['位置'] = df.apply(lambda x: '上方' if x['ratio'] > x['ma20'] else '下方', axis=1)
 
-# 归一化：起始点为 100
-base_2000 = df['2000'].iloc[0]
-base_300 = df['300'].iloc[0]
-df['2000_norm'] = df['2000'] / base_2000 * 100
-df['300_norm'] = df['300'] / base_300 * 100
+    # 保存 CSV
+    export = df[['n', 'd', 'ratio', 'ma20', '位置']].copy()
+    export.columns = ['分子指数', '分母指数', '比值', '20日均线', '均线位置']
+    export.to_csv('index_ratio_from_db.csv', encoding='utf-8-sig')
 
-# 比率与20日均线
-df['ratio'] = df['2000_norm'] / df['300_norm']
-df['ratio_ma20'] = df['ratio'].rolling(window=20).mean()
+    # 画图
+    plt.figure(figsize=(12, 6))
+    plt.plot(df.index, df['ratio'], label='比值')
+    plt.plot(df.index, df['ma20'], label='20日均线', linestyle='--')
+    plt.title(f'{numerator_code} / {denominator_code} 比值与20日均线')
+    plt.xlabel('日期')
+    plt.ylabel('比值')
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
 
-# 绘图
-plt.figure(figsize=(12, 6))
-plt.plot(df.index, df['ratio'], label='中证2000 / 沪深300 比值')
-plt.plot(df.index, df['ratio_ma20'], label='20日均线', linestyle='--')
-plt.title('中证2000 / 沪深300 比值与20日均线')
-plt.xlabel('日期')
-plt.ylabel('比值')
-plt.legend()
-plt.grid(True)
-plt.tight_layout()
-plt.show()
+# GUI 界面
+root = tk.Tk()
+root.title("指数比值分析工具")
+
+label1 = tk.Label(root, text="选择分子（上方指数）")
+label1.grid(row=0, column=0)
+numerator_cb = ttk.Combobox(root, values=list(INDEX_DICT.keys()))
+numerator_cb.current(0)
+numerator_cb.grid(row=0, column=1)
+
+label2 = tk.Label(root, text="选择分母（下方指数）")
+label2.grid(row=1, column=0)
+denominator_cb = ttk.Combobox(root, values=list(INDEX_DICT.keys()))
+denominator_cb.current(1)
+denominator_cb.grid(row=1, column=1)
+
+def on_plot():
+    num_name = numerator_cb.get()
+    den_name = denominator_cb.get()
+    if num_name == den_name:
+        messagebox.showwarning("错误", "请选择不同的指数进行比较")
+        return
+    plot_ratio(INDEX_DICT[num_name], INDEX_DICT[den_name])
+
+btn_plot = tk.Button(root, text="绘制比值图", command=on_plot, bg="lightgreen")
+btn_plot.grid(row=2, column=0, columnspan=2, pady=10)
+
+btn_download = tk.Button(root, text="下载/更新数据", command=update_index_data, bg="skyblue")
+btn_download.grid(row=3, column=0, columnspan=2, pady=10)
+
+root.mainloop()
