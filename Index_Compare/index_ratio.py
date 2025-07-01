@@ -1,4 +1,4 @@
-# 指数比值分析系统（带数据库缓存 + 可视化 + Tkinter交互）
+# 指数比值分析系统（使用数据库 + Tkinter GUI + 可变均线周期）
 
 import tushare as ts
 import pandas as pd
@@ -52,7 +52,9 @@ def update_index_data():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     for name, ts_code in INDEX_DICT.items():
-        df = pro.index_daily(ts_code=ts_code, start_date=START_DATE, end_date=TODAY)
+        latest = cursor.execute(f"SELECT MAX(trade_date) FROM {TABLE_NAME} WHERE ts_code = ?", (ts_code,)).fetchone()[0]
+        start = latest if latest else START_DATE
+        df = pro.index_daily(ts_code=ts_code, start_date=start, end_date=TODAY)
         if df.empty:
             continue
         df = df[['ts_code', 'trade_date', 'close']]
@@ -70,7 +72,7 @@ def load_index_data(ts_code):
     return df
 
 # 绘图函数
-def plot_ratio(numerator_code, denominator_code):
+def plot_ratio(numerator_code, denominator_code, ma_days):
     df_n = load_index_data(numerator_code)
     df_d = load_index_data(denominator_code)
     df = pd.DataFrame()
@@ -78,24 +80,21 @@ def plot_ratio(numerator_code, denominator_code):
     df['d'] = df_d['close']
     df.dropna(inplace=True)
 
-    base_n = df['n'].iloc[0]
-    base_d = df['d'].iloc[0]
-    df['n_norm'] = df['n'] / base_n * 100
-    df['d_norm'] = df['d'] / base_d * 100
-    df['ratio'] = df['n_norm'] / df['d_norm']
-    df['ma20'] = df['ratio'].rolling(window=20).mean()
-    df['位置'] = df.apply(lambda x: '上方' if x['ratio'] > x['ma20'] else '下方', axis=1)
+    # 比值及均线
+    df['ratio'] = df['n'] / df['d']
+    df['ma'] = df['ratio'].rolling(window=ma_days).mean()
+    df['位置'] = df.apply(lambda x: '上方' if x['ratio'] > x['ma'] else '下方', axis=1)
 
     # 保存 CSV
-    export = df[['n', 'd', 'ratio', 'ma20', '位置']].copy()
-    export.columns = ['分子指数', '分母指数', '比值', '20日均线', '均线位置']
+    export = df[['n', 'd', 'ratio', 'ma', '位置']].copy()
+    export.columns = ['分子指数', '分母指数', '比值', f'{ma_days}日均线', '均线位置']
     export.to_csv('index_ratio_from_db.csv', encoding='utf-8-sig')
 
     # 画图
     plt.figure(figsize=(12, 6))
     plt.plot(df.index, df['ratio'], label='比值')
-    plt.plot(df.index, df['ma20'], label='20日均线', linestyle='--')
-    plt.title(f'{numerator_code} / {denominator_code} 比值与20日均线')
+    plt.plot(df.index, df['ma'], label=f'{ma_days}日均线', linestyle='--')
+    plt.title(f'{numerator_code} / {denominator_code} 比值与{ma_days}日均线')
     plt.xlabel('日期')
     plt.ylabel('比值')
     plt.grid(True)
@@ -119,18 +118,29 @@ denominator_cb = ttk.Combobox(root, values=list(INDEX_DICT.keys()))
 denominator_cb.current(1)
 denominator_cb.grid(row=1, column=1)
 
+label3 = tk.Label(root, text="选择均线天数")
+label3.grid(row=2, column=0)
+ma_cb = ttk.Combobox(root, values=[5, 10, 20, 30, 60, 120, 240])
+ma_cb.set(20)
+ma_cb.grid(row=2, column=1)
+
 def on_plot():
     num_name = numerator_cb.get()
     den_name = denominator_cb.get()
     if num_name == den_name:
         messagebox.showwarning("错误", "请选择不同的指数进行比较")
         return
-    plot_ratio(INDEX_DICT[num_name], INDEX_DICT[den_name])
+    try:
+        ma_days = int(ma_cb.get())
+    except:
+        messagebox.showwarning("错误", "均线天数必须为整数")
+        return
+    plot_ratio(INDEX_DICT[num_name], INDEX_DICT[den_name], ma_days)
 
 btn_plot = tk.Button(root, text="绘制比值图", command=on_plot, bg="lightgreen")
-btn_plot.grid(row=2, column=0, columnspan=2, pady=10)
+btn_plot.grid(row=3, column=0, columnspan=2, pady=10)
 
 btn_download = tk.Button(root, text="下载/更新数据", command=update_index_data, bg="skyblue")
-btn_download.grid(row=3, column=0, columnspan=2, pady=10)
+btn_download.grid(row=4, column=0, columnspan=2, pady=10)
 
 root.mainloop()
